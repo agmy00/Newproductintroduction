@@ -455,26 +455,50 @@ def get_db():
         db.close()
 
 
+def _chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> List[str]:
+    """Split text into overlapping chunks, preferring sentence boundaries."""
+    text = text.strip()
+    if len(text) <= chunk_size:
+        return [text] if text else []
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end < len(text):
+            # Prefer breaking at a sentence boundary
+            boundary = text.rfind('. ', start + chunk_size // 2, end)
+            if boundary != -1:
+                end = boundary + 1
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = end - overlap
+    return chunks
+
+
 def _ingest_to_rag(db: Session, source_type: str, source_id: int,
                    project_id: int, content: str, meta: dict):
-    """Insert a document into the RAG table and update the in-memory engine."""
-    # Remove existing entry for same source to avoid duplicates
+    """Split content into chunks and store each as a separate RAG row."""
+    # Remove all existing chunks for this source before re-ingesting
     db.query(RAGDocumentDB).filter(
         RAGDocumentDB.source_type == source_type,
         RAGDocumentDB.source_id == source_id,
     ).delete()
 
-    row = RAGDocumentDB(
-        source_type=source_type,
-        source_id=source_id,
-        project_id=project_id,
-        content=content,
-        meta=meta,
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    rag_engine.add_document(row.id, source_type, content, meta)
+    chunks = _chunk_text(content)
+    for i, chunk in enumerate(chunks):
+        chunk_meta = {**meta, "chunk_index": i, "total_chunks": len(chunks)}
+        row = RAGDocumentDB(
+            source_type=source_type,
+            source_id=source_id,
+            project_id=project_id,
+            content=chunk,
+            meta=chunk_meta,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        rag_engine.add_document(row.id, source_type, chunk, chunk_meta)
     rag_engine._dirty = True
 
 
